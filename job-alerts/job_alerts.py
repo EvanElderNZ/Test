@@ -319,7 +319,7 @@ def _jooble_search(query: str, location: str = "London") -> list[dict]:
     url = f"https://jooble.org/api/{api_key}"
     payload = {
         "keywords": query,
-        "location": location,
+        "location": "London, United Kingdom",  # explicit country to avoid London, Ontario etc.
         "page": 1,
         "ResultOnPage": RESULTS_PER_QUERY,
     }
@@ -429,6 +429,71 @@ def _estimate_salary_range(job: dict) -> tuple[int, int]:
     return (snapped - 5) * 1_000, (snapped + 5) * 1_000
 
 
+# ---------------------------------------------------------------------------
+# Quality filters
+# ---------------------------------------------------------------------------
+
+# Reject any location that names a non-UK London (Ontario, Kentucky, etc.)
+_NON_UK_LONDON_RE = re.compile(
+    r"\b(?:ontario|canada|kentucky|ohio|tennessee|oregon|arkansas|virginia|"
+    r"united\s+states|usa)\b"
+    r"|,\s*(?:on|ky|oh|tn|or|ar|va|wv)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_london_uk(location: str) -> bool:
+    """Return False only when the location explicitly names a non-UK London."""
+    return not _NON_UK_LONDON_RE.search(location or "")
+
+
+# Reject job titles that are clearly blue-collar, trades, hospitality, retail,
+# basic admin, or otherwise have no plausible pivot from this background.
+# Uses word-boundary matching to avoid false positives (e.g. "contractor" ≠ "cleaner").
+_BLOCKED_TITLE_RE = re.compile(
+    r"\b(?:"
+    # Transport & logistics
+    r"forklift|hgv"
+    r"|(?:lorry|van|truck|bus|taxi|delivery|courier)\s+driver"
+    r"|warehouse\s+(?:operative|worker|assistant|supervisor|picker|packer)"
+    r"|crane\s+operator|stevedore|longshoreman|docker(?:hand)?"
+    r"|picker|packer"
+    # Trades & manual
+    r"|electrician|plumber|carpenter|joiner|bricklayer|plasterer"
+    r"|scaffolder|roofer|groundworker|tiler"
+    r"|painter\s+(?:and\s+)?decorator"
+    r"|gas\s+(?:fitter|installer|service\s+engineer)"
+    r"|boiler\s+(?:engineer|technician|installer)"
+    # Food & hospitality
+    r"|(?:head|sous|commis|pastry|prep|section)\s+chef"
+    r"|kitchen\s+(?:porter|assistant|hand)"
+    r"|catering\s+(?:assistant|operative)"
+    r"|waiter|waitress|bartender|barista|line\s+cook"
+    # Retail & basic admin
+    r"|retail\s+(?:assistant|advisor|manager)"
+    r"|shop\s+(?:assistant|manager)|store\s+assistant"
+    r"|sales\s+assistant|sales\s+advisor"
+    r"|receptionist|cleaner|cleaning\s+(?:operative|supervisor)|caretaker"
+    # Care & health (entry-level non-professional)
+    r"|care\s+(?:assistant|worker)|support\s+worker"
+    r"|healthcare\s+assistant|nursing\s+assistant|domiciliary"
+    # Finance operations (non-professional)
+    r"|bookkeeper|payroll\s+(?:administrator|officer|assistant)"
+    # Physical security
+    r"|security\s+guard"
+    # Other
+    r"|teaching\s+assistant|telesales"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def _is_relevant_role(job: dict) -> bool:
+    """Return False if the job title clearly signals an irrelevant blue-collar
+    or unrelated role with no plausible pivot angle from this background."""
+    return not _BLOCKED_TITLE_RE.search(job.get("title", ""))
+
+
 def _deduplicate(jobs: list[dict]) -> list[dict]:
     seen_urls:   set[str] = set()
     seen_titles: set[str] = set()
@@ -461,6 +526,11 @@ def fetch_jobs_for_category(category: dict) -> list[dict]:
         jobs.extend(_adzuna_search(query))
         jobs.extend(_reed_search(query))
         jobs.extend(_jooble_search(query))
+
+    # Remove non-UK Londons and irrelevant/blue-collar titles before dedup
+    jobs = [j for j in jobs if _is_london_uk(j.get("location", ""))]
+    jobs = [j for j in jobs if _is_relevant_role(j)]
+
     deduped = _deduplicate(jobs)
 
     # Attach category so _estimate_salary_range can use the sector premium
