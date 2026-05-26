@@ -63,14 +63,20 @@ BAND_BY_KEY = {b["key"]: b for b in SALARY_BANDS}
 def classify_salary(job: dict) -> str:
     low  = job.get("_salary_min")
     high = job.get("_salary_max")
+
+    # Fall back to estimate when no real salary data is present
+    if low is None and high is None:
+        low  = job.get("_est_salary_min")
+        high = job.get("_est_salary_max")
     if low is None and high is None:
         return "unknown"
+
     if low and high:
         reference = (low + high) / 2
     elif low:
         reference = low
     else:
-        reference = high * 0.85  # only max known — assume slightly below
+        reference = high * 0.85
     if reference >= 75_000:
         return "high"
     if reference >= 64_000:
@@ -266,6 +272,50 @@ def _fmt_salary(low: Optional[float], high: Optional[float]) -> str:
     return "Salary not specified"
 
 
+# Ordered most-to-least senior so first match wins (avoids "engineer" firing before "senior engineer")
+_SENIORITY_MAP: list[tuple[list[str], int]] = [
+    (["chief ", " cto", " cfo", " ceo", " coo"],                                          110),
+    (["technical director", "associate director", "director of", " director"],              90),
+    (["principal engineer", "principal consultant", "principal analyst",
+      "principal adviser", "principal advisor"],                                            78),
+    (["senior manager", "senior programme", "lead engineer", "lead consultant",
+      "lead analyst", "programme manager"],                                                 70),
+    (["senior engineer", "senior consultant", "senior analyst", "senior adviser",
+      "senior advisor", "senior associate", "senior specialist", "senior officer"],        62),
+    (["project manager", "project officer", "project lead", "programme officer"],          55),
+    (["engineer", "consultant", "analyst", "adviser", "advisor",
+      "specialist", "officer", "coordinator", "modeller"],                                 46),
+    (["graduate", "junior ", "trainee", "assistant ", "entry level"],                      32),
+]
+
+# Additional premium by category (£k added to midpoint)
+_CATEGORY_PREMIUM: dict[str, int] = {
+    "Development Banks & International Finance": 8,
+    "Insurance & Catastrophe Risk":              5,
+    "ESG, Sustainability & Climate Finance":     3,
+    "Renewable Energy":                          3,
+    "Ports, Harbours & Infrastructure Development": 2,
+}
+
+
+def _estimate_salary_range(job: dict) -> tuple[int, int]:
+    """Return an estimated £10k salary range (low, high) for a role with no listed salary."""
+    text = f"{job.get('title', '')} {job.get('description', '')}".lower()
+    cat_name = (job.get("_category") or {}).get("name", "")
+
+    midpoint_k = 46  # default: mid-level individual contributor
+    for keywords, salary_k in _SENIORITY_MAP:
+        if any(kw in text for kw in keywords):
+            midpoint_k = salary_k
+            break
+
+    midpoint_k += _CATEGORY_PREMIUM.get(cat_name, 0)
+
+    # Snap to nearest £5k then build £10k range
+    snapped = round(midpoint_k / 5) * 5
+    return (snapped - 5) * 1_000, (snapped + 5) * 1_000
+
+
 def _deduplicate(jobs: list[dict]) -> list[dict]:
     seen_urls:   set[str] = set()
     seen_titles: set[str] = set()
@@ -287,6 +337,18 @@ def fetch_jobs_for_category(category: dict) -> list[dict]:
         jobs.extend(_adzuna_search(query))
         jobs.extend(_reed_search(query))
     deduped = _deduplicate(jobs)
+
+    # Attach category now so _estimate_salary_range can use it for the premium
+    for j in deduped:
+        j["_category"] = category
+        if j["_salary_min"] is None and j["_salary_max"] is None:
+            est_low, est_high = _estimate_salary_range(j)
+            j["_est_salary_min"] = est_low
+            j["_est_salary_max"] = est_high
+            j["_salary_estimated"] = True
+        else:
+            j["_salary_estimated"] = False
+
     return deduped[:10]
 
 
@@ -316,7 +378,7 @@ _JOB_CARD = """
   <div style="margin-top:6px;font-size:13px;color:#475569;">
     <strong>{company}</strong>&nbsp;·&nbsp;{location}
   </div>
-  <div style="margin-top:4px;font-size:13px;color:#16a34a;font-weight:500;">{salary}</div>
+  <div style="margin-top:4px;font-size:13px;font-weight:500;">{salary_html}</div>
   <div style="margin-top:8px;font-size:13px;color:#64748b;line-height:1.5;">{description}</div>
   <div style="margin-top:10px;">
     <a href="{url}"
@@ -357,16 +419,28 @@ _SUMMARY_PILL = (
 )
 
 
+def _salary_html(job: dict) -> str:
+    if not job.get("_salary_estimated"):
+        return f'<span style="color:#16a34a;">{job["salary"]}</span>'
+    est_low  = job.get("_est_salary_min", 0)
+    est_high = job.get("_est_salary_max", 0)
+    range_str = f"~£{int(est_low):,} – £{int(est_high):,}"
+    return (
+        f'<span style="color:#64748b;">{range_str}</span>'
+        f'<span style="font-size:11px;color:#94a3b8;font-weight:400;margin-left:6px;">'
+        f'estimated · salary not listed</span>'
+    )
+
+
 def build_email_html(results: list[dict]) -> str:
     today = datetime.now().strftime("%A %d %B %Y")
 
-    # Flatten all jobs, tagging each with its category
+    # Flatten all jobs (_category already attached by fetch_jobs_for_category)
     all_jobs: list[dict] = []
     for r in results:
         for j in r["jobs"]:
             j = dict(j)
-            j["_category"] = r["category"]
-            j["_band"]     = classify_salary(j)
+            j["_band"] = classify_salary(j)
             all_jobs.append(j)
 
     total = len(all_jobs)
@@ -394,7 +468,7 @@ def build_email_html(results: list[dict]) -> str:
                     title=j["title"],
                     company=j["company"],
                     location=j["location"],
-                    salary=j["salary"],
+                    salary_html=_salary_html(j),
                     description=j["description"],
                     url=j["url"],
                     source=j["source"],
@@ -468,14 +542,20 @@ def build_email_html(results: list[dict]) -> str:
 def build_plain_text(results: list[dict]) -> str:
     today = datetime.now().strftime("%A %d %B %Y")
 
-    # Flatten + classify
+    # Flatten + classify (_category already set by fetch_jobs_for_category)
     all_jobs: list[dict] = []
     for r in results:
         for j in r["jobs"]:
             j = dict(j)
-            j["_category"] = r["category"]
-            j["_band"]     = classify_salary(j)
+            j["_band"] = classify_salary(j)
             all_jobs.append(j)
+
+    def _plain_salary(j: dict) -> str:
+        if not j.get("_salary_estimated"):
+            return j["salary"]
+        est_low  = j.get("_est_salary_min", 0)
+        est_high = j.get("_est_salary_max", 0)
+        return f"~£{int(est_low):,} – £{int(est_high):,} (estimated)"
 
     lines = [f"DAILY JOB ALERTS — LONDON   {today}", "=" * 60]
     for band in SALARY_BANDS:
@@ -487,7 +567,7 @@ def build_plain_text(results: list[dict]) -> str:
             lines.append("  No roles in this salary range in the last 3 days.")
         for j in jobs_in_band:
             lines.append(f"\n  {j['title']}")
-            lines.append(f"  {j['company']}  |  {j['location']}  |  {j['salary']}")
+            lines.append(f"  {j['company']}  |  {j['location']}  |  {_plain_salary(j)}")
             lines.append(f"  Category: {j['_category']['name']}")
             lines.append(f"  {j['url']}")
     lines.append("\n" + "=" * 60)
