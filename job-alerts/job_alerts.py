@@ -5,6 +5,7 @@ import os
 import re
 import logging
 import smtplib
+import xml.etree.ElementTree as ET
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from datetime import datetime
@@ -97,7 +98,9 @@ CATEGORIES = [
         "accent": "#dbeafe",
         "queries": [
             "climate risk consultant",
+            "climate risk associate",
             "physical climate risk analyst",
+            "lead associate climate",
             "flood scientist",
             "climate scientist risk",
             "loss modeller climate",
@@ -430,6 +433,214 @@ def _estimate_salary_range(job: dict) -> tuple[int, int]:
 
 
 # ---------------------------------------------------------------------------
+# Job search: Indeed (RSS — no key required)
+# ---------------------------------------------------------------------------
+
+def _indeed_search(query: str, location: str = "London, UK") -> list[dict]:
+    url = "https://www.indeed.co.uk/rss"
+    params = {"q": query, "l": location, "radius": "10", "sort": "date"}
+    try:
+        r = requests.get(
+            url, params=params, timeout=15,
+            headers={"User-Agent": "Mozilla/5.0 (compatible; job-alert-bot/1.0)"},
+        )
+        r.raise_for_status()
+        root = ET.fromstring(r.content)
+        return [n for n in (_normalise_indeed(i) for i in root.findall(".//item")) if n]
+    except Exception as exc:
+        logger.error("Indeed '%s': %s", query, exc)
+        return []
+
+
+def _normalise_indeed(item) -> Optional[dict]:
+    def _t(tag: str) -> str:
+        el = item.find(tag)
+        return (el.text or "").strip() if el is not None else ""
+
+    raw_title = _t("title")
+    # "Job Title - City, Postcode" → split off location suffix
+    title = raw_title.split(" - ")[0].strip() if " - " in raw_title else raw_title
+
+    # Strip HTML from description
+    desc_raw = _t("description")
+    desc_clean = re.sub(r"<[^>]+>", " ", desc_raw).strip()
+    desc_clean = re.sub(r"\s+", " ", desc_clean)[:220] + "…"
+
+    # Try to parse salary from description text
+    sal_match = re.search(
+        r"£[\d,]+(?:\s*[–\-]\s*£[\d,]+)?(?:\s*(?:per\s+annum|pa|k))?",
+        desc_raw, re.IGNORECASE,
+    )
+    sal_str = sal_match.group(0).strip() if sal_match else ""
+    sal_min, sal_max = _parse_salary_string(sal_str)
+
+    location = _t("georss:point") or ""
+    if not location:
+        # Fallback: grab the suffix of the title if present
+        parts = raw_title.rsplit(" - ", 1)
+        location = parts[1] if len(parts) > 1 else "London, UK"
+
+    url = _t("link") or _t("guid")
+    if not url:
+        return None
+
+    return {
+        "title":       title,
+        "company":     _t("source") or "Unknown",
+        "location":    location,
+        "salary":      sal_str if sal_str else "Salary not specified",
+        "_salary_min": sal_min,
+        "_salary_max": sal_max,
+        "url":         url,
+        "description": desc_clean,
+        "created":     _t("pubDate"),
+        "source":      "Indeed",
+    }
+
+
+# ---------------------------------------------------------------------------
+# Job search: Workday direct (target company career portals)
+# ---------------------------------------------------------------------------
+
+# Companies from the target list that host careers on Workday.
+# url_base is the root of the careers site; board is the job board name within it.
+# keywords are searched one-by-one; results are filtered to London roles only.
+WORKDAY_TARGETS: list[dict] = [
+    {
+        "company": "WTW",
+        "url_base": "https://wtw.wd1.myworkdayjobs.com",
+        "board":    "wtw",
+        "keywords": ["climate", "catastrophe", "nat cat", "sustainability", "risk"],
+        "category": "Climate Risk & Physical Risk Analytics",
+    },
+    {
+        "company": "Macquarie Asset Management",
+        "url_base": "https://macquarie.wd3.myworkdayjobs.com",
+        "board":    "External",
+        "keywords": ["green", "infrastructure", "climate", "energy"],
+        "category": "Green Infrastructure & Climate Investing",
+    },
+    {
+        "company": "BlackRock",
+        "url_base": "https://blackrock.wd1.myworkdayjobs.com",
+        "board":    "BlackRock",
+        "keywords": ["climate", "infrastructure", "ESG", "energy"],
+        "category": "Green Infrastructure & Climate Investing",
+    },
+    {
+        "company": "Schroders",
+        "url_base": "https://schroders.wd3.myworkdayjobs.com",
+        "board":    "External",
+        "keywords": ["climate", "sustainability", "renewable", "greencoat"],
+        "category": "Renewable Energy Asset Management",
+    },
+    {
+        "company": "Hiscox",
+        "url_base": "https://hiscox.wd3.myworkdayjobs.com",
+        "board":    "Hiscox",
+        "keywords": ["catastrophe", "ILS", "reinsurance", "climate"],
+        "category": "Insurance Linked Securities & Cat Bonds",
+    },
+]
+
+# Synthetic category used when tagging direct-company results in the email
+_DIRECT_CATEGORY_STUB = {
+    "name":   "Direct Company Listing",
+    "color":  "#0f172a",
+    "accent": "#f1f5f9",
+}
+
+
+def _workday_search(config: dict) -> list[dict]:
+    url_base = config["url_base"]
+    board    = config["board"]
+    tenant   = url_base.split("//")[1].split(".")[0]  # e.g. "wtw"
+    cxs_url  = f"{url_base}/wday/cxs/{tenant}/{board}/jobs"
+
+    seen: set[str] = set()
+    jobs: list[dict] = []
+
+    for kw in config["keywords"]:
+        try:
+            r = requests.post(
+                cxs_url,
+                json={"limit": 10, "offset": 0, "searchText": kw},
+                headers={"Content-Type": "application/json"},
+                timeout=15,
+            )
+            if r.status_code == 404:
+                logger.warning("Workday %s: endpoint not found — board name may differ", config["company"])
+                break
+            r.raise_for_status()
+            for raw in r.json().get("jobPostings", []):
+                uid = raw.get("jobReqId") or raw.get("externalPath", "")
+                if uid in seen:
+                    continue
+                seen.add(uid)
+                normalised = _normalise_workday(raw, config, url_base, board)
+                if normalised:
+                    jobs.append(normalised)
+        except Exception as exc:
+            logger.error("Workday %s '%s': %s", config["company"], kw, exc)
+            break  # don't hammer a company site that isn't responding
+
+    return jobs
+
+
+def _normalise_workday(raw: dict, config: dict, url_base: str, board: str) -> Optional[dict]:
+    location = raw.get("locationsText", "")
+    # Only include London UK postings; skip roles in other cities/countries
+    if location and "london" not in location.lower():
+        return None
+    if location and not _is_london_uk(location):
+        return None
+
+    external_path = raw.get("externalPath", "")
+    job_url = f"{url_base}/{board}{external_path}" if external_path else url_base
+
+    bullets = [b for b in (raw.get("bulletFields") or []) if b]
+    description = " | ".join(bullets[:3])[:220] + "…" if bullets else "See full job listing for details…"
+
+    return {
+        "title":       raw.get("title", "").strip(),
+        "company":     config["company"],
+        "location":    location or "London, UK",
+        "salary":      "Salary not specified",
+        "_salary_min": None,
+        "_salary_max": None,
+        "url":         job_url,
+        "description": description,
+        "created":     raw.get("postedOn", ""),
+        "source":      "Direct",
+    }
+
+
+def fetch_direct_company_jobs() -> list[dict]:
+    """Search target company career portals and return relevant London jobs."""
+    all_jobs: list[dict] = []
+    for config in WORKDAY_TARGETS:
+        logger.info("  Direct: %s", config["company"])
+        jobs = _workday_search(config)
+        # Resolve category object and run salary estimation
+        cat = next((c for c in CATEGORIES if c["name"] == config["category"]), CATEGORIES[0])
+        for j in jobs:
+            j["_category"] = cat
+            if j["_salary_min"] is None and j["_salary_max"] is None:
+                est_low, est_high = _estimate_salary_range(j)
+                j["_est_salary_min"] = est_low
+                j["_est_salary_max"] = est_high
+                j["_salary_estimated"] = True
+            else:
+                j["_salary_estimated"] = False
+        all_jobs.extend(jobs)
+
+    # Deduplicate across companies, apply relevance and floor filters
+    deduped = _deduplicate(all_jobs)
+    deduped = [j for j in deduped if _is_relevant_role(j) and _above_floor(j)]
+    return deduped
+
+
+# ---------------------------------------------------------------------------
 # Quality filters
 # ---------------------------------------------------------------------------
 
@@ -526,6 +737,7 @@ def fetch_jobs_for_category(category: dict) -> list[dict]:
         jobs.extend(_adzuna_search(query))
         jobs.extend(_reed_search(query))
         jobs.extend(_jooble_search(query))
+        jobs.extend(_indeed_search(query))
 
     # Remove non-UK Londons and irrelevant/blue-collar titles before dedup
     jobs = [j for j in jobs if _is_london_uk(j.get("location", ""))]
@@ -727,8 +939,8 @@ def build_email_html(results: list[dict]) -> str:
     <div style="background:#f8fafc;border-top:1px solid #e2e8f0;padding:18px 32px;
                 border-radius:0 0 12px 12px;text-align:center;">
       <p style="margin:0;font-size:11px;color:#94a3b8;">
-        Delivered daily · Adzuna, Reed.co.uk &amp; Jooble · London area, UK ·
-        {len(CATEGORIES)} categories · roles below £50k excluded
+        Delivered daily · Adzuna · Reed · Jooble · Indeed · Direct company portals ·
+        London, UK · roles below £50k excluded
       </p>
     </div>
 
@@ -817,11 +1029,31 @@ def send_email(html_body: str, plain_body: str, dry_run: bool = False) -> bool:
 def run(dry_run: bool = False) -> dict:
     logger.info("Starting job search — %s", datetime.now().strftime("%Y-%m-%d %H:%M"))
     results = []
+
+    # Board-based searches (Adzuna, Reed, Jooble, Indeed)
     for cat in CATEGORIES:
         logger.info("Searching: %s", cat["name"])
         jobs = fetch_jobs_for_category(cat)
         logger.info("  Found %d jobs", len(jobs))
         results.append({"category": cat, "jobs": jobs})
+
+    # Direct company career portal searches (Workday etc.)
+    logger.info("Searching direct company career portals...")
+    direct_jobs = fetch_direct_company_jobs()
+    logger.info("  Found %d direct jobs", len(direct_jobs))
+
+    # Merge direct jobs into the matching category buckets
+    # (each direct job already has _category set to its correct category)
+    if direct_jobs:
+        for j in direct_jobs:
+            cat_name = j["_category"]["name"]
+            for r in results:
+                if r["category"]["name"] == cat_name:
+                    # Avoid duplicating a job already found by board search
+                    existing_urls = {x["url"].split("?")[0] for x in r["jobs"]}
+                    if j["url"].split("?")[0] not in existing_urls:
+                        r["jobs"].append(j)
+                    break
 
     html  = build_email_html(results)
     plain = build_plain_text(results)
