@@ -132,8 +132,40 @@
   </div>
   <div id="trigger-msg"></div>
 
+  <!-- Salary band summary (populated after a run) -->
+  {% if state.results %}
+  {% set ns = namespace(high=0, mid=0, low=0, unknown=0) %}
+  {% for r in state.results %}
+    {% for j in r.jobs %}
+      {% set band = j._band if j._band is defined else 'unknown' %}
+      {% if band == 'high' %}{% set ns.high = ns.high + 1 %}
+      {% elif band == 'mid' %}{% set ns.mid = ns.mid + 1 %}
+      {% elif band == 'low' %}{% set ns.low = ns.low + 1 %}
+      {% else %}{% set ns.unknown = ns.unknown + 1 %}{% endif %}
+    {% endfor %}
+  {% endfor %}
+  <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:24px;">
+    <div class="cat-card" style="border-left-color:#166534;flex:1;min-width:140px;">
+      <div style="font-size:22px;font-weight:700;color:#14532d;">{{ ns.high }}</div>
+      <div style="font-size:12px;color:#94a3b8;">Above £75k</div>
+    </div>
+    <div class="cat-card" style="border-left-color:#92400e;flex:1;min-width:140px;">
+      <div style="font-size:22px;font-weight:700;color:#78350f;">{{ ns.mid }}</div>
+      <div style="font-size:12px;color:#94a3b8;">£64k – £75k</div>
+    </div>
+    <div class="cat-card" style="border-left-color:#1d4ed8;flex:1;min-width:140px;">
+      <div style="font-size:22px;font-weight:700;color:#1e3a5f;">{{ ns.low }}</div>
+      <div style="font-size:12px;color:#94a3b8;">Below £64k</div>
+    </div>
+    <div class="cat-card" style="border-left-color:#6b7280;flex:1;min-width:140px;">
+      <div style="font-size:22px;font-weight:700;color:#374151;">{{ ns.unknown }}</div>
+      <div style="font-size:12px;color:#94a3b8;">Salary not disclosed</div>
+    </div>
+  </div>
+  {% endif %}
+
   <!-- Categories -->
-  <div class="section-title">Search Categories</div>
+  <div class="section-title">Search Categories ({{ categories | length }})</div>
   <div class="categories">
     {% for cat in categories %}
     <div class="cat-card" style="border-left-color: {{ cat.color }}">

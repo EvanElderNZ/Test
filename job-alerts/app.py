@@ -6,7 +6,11 @@ from datetime import datetime
 
 from flask import Flask, jsonify, render_template, request
 
-from job_alerts import CATEGORIES, build_email_html, build_plain_text, fetch_jobs_for_category, send_email
+from job_alerts import (
+    CATEGORIES, SALARY_BANDS, classify_salary,
+    build_email_html, build_plain_text,
+    fetch_jobs_for_category, send_email,
+)
 
 app = Flask(__name__)
 
@@ -26,6 +30,11 @@ def _run_search(send: bool = True, dry_run: bool = False) -> dict:
     sent = False
     if send:
         sent = send_email(html, plain, dry_run=dry_run)
+
+    # Annotate jobs with salary band so the dashboard template can count them
+    for r in results:
+        for j in r["jobs"]:
+            j["_band"] = classify_salary(j)
 
     _state.update(
         {
@@ -53,6 +62,9 @@ def preview():
         for cat in CATEGORIES:
             jobs = fetch_jobs_for_category(cat)
             results.append({"category": cat, "jobs": jobs})
+        for r in results:
+            for j in r["jobs"]:
+                j["_band"] = classify_salary(j)
         html = build_email_html(results)
         _state["html"] = html
         _state["results"] = results
