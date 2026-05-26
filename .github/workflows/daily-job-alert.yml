@@ -1,0 +1,34 @@
+name: Daily Job Alert Email
+
+on:
+  schedule:
+    # 07:00 UTC every day (08:00 BST / 07:00 GMT)
+    - cron: "0 7 * * *"
+  workflow_dispatch:  # allows manual trigger from the Actions tab
+
+jobs:
+  send-alerts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r job-alerts/requirements.txt
+
+      - name: Run job alert script
+        working-directory: job-alerts
+        env:
+          ADZUNA_APP_ID:       ${{ secrets.ADZUNA_APP_ID }}
+          ADZUNA_APP_KEY:      ${{ secrets.ADZUNA_APP_KEY }}
+          REED_API_KEY:        ${{ secrets.REED_API_KEY }}
+          GMAIL_USER:          ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD:  ${{ secrets.GMAIL_APP_PASSWORD }}
+        run: python job_alerts.py

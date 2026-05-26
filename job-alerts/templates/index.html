@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>London Job Alerts — Dashboard</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; padding: 0;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #f1f5f9; color: #1e293b;
+    }
+    header {
+      background: linear-gradient(135deg, #0c2340 0%, #1a4a7a 100%);
+      padding: 28px 40px;
+    }
+    header h1 { margin: 0; color: #fff; font-size: 24px; }
+    header p  { margin: 4px 0 0; color: #90c4f9; font-size: 14px; }
+    main { max-width: 860px; margin: 32px auto; padding: 0 20px 60px; }
+
+    .status-bar {
+      background: #fff; border: 1px solid #e2e8f0; border-radius: 10px;
+      padding: 20px 24px; margin-bottom: 28px; display: flex;
+      align-items: center; flex-wrap: wrap; gap: 16px;
+    }
+    .stat { text-align: center; }
+    .stat .val { font-size: 28px; font-weight: 700; color: #0c2340; }
+    .stat .lbl { font-size: 12px; color: #94a3b8; text-transform: uppercase; letter-spacing: .5px; }
+    .divider { width: 1px; height: 40px; background: #e2e8f0; }
+
+    .actions { display: flex; gap: 10px; margin-left: auto; flex-wrap: wrap; }
+    .btn {
+      cursor: pointer; border: none; border-radius: 7px; font-size: 14px;
+      font-weight: 600; padding: 10px 20px; text-decoration: none;
+      display: inline-flex; align-items: center; gap: 6px;
+    }
+    .btn-primary { background: #0c2340; color: #fff; }
+    .btn-primary:hover { background: #1a4a7a; }
+    .btn-secondary { background: #e2e8f0; color: #1e293b; }
+    .btn-secondary:hover { background: #cbd5e1; }
+    .btn:disabled { opacity: .5; cursor: not-allowed; }
+
+    .section-title {
+      font-size: 18px; font-weight: 700; margin: 0 0 16px; color: #0c2340;
+    }
+    .categories { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+    @media (max-width: 600px) { .categories { grid-template-columns: 1fr; } }
+    .cat-card {
+      background: #fff; border: 1px solid #e2e8f0; border-radius: 10px;
+      padding: 16px 18px; border-left: 4px solid;
+    }
+    .cat-card h3 { margin: 0 0 6px; font-size: 14px; }
+    .cat-card .queries { font-size: 12px; color: #94a3b8; line-height: 1.6; }
+
+    .setup { background: #fff; border: 1px solid #e2e8f0; border-radius: 10px; padding: 24px; margin-top: 28px; }
+    .setup h2 { margin: 0 0 16px; font-size: 18px; font-weight: 700; color: #0c2340; }
+    .setup p { margin: 0 0 10px; font-size: 14px; color: #475569; line-height: 1.6; }
+    .setup ol { padding-left: 20px; margin: 0 0 10px; }
+    .setup ol li { font-size: 14px; color: #475569; margin-bottom: 6px; line-height: 1.6; }
+    code {
+      background: #f1f5f9; border: 1px solid #e2e8f0; border-radius: 4px;
+      padding: 2px 6px; font-size: 12px; font-family: 'SFMono-Regular', Consolas, monospace;
+    }
+    pre {
+      background: #0f172a; color: #e2e8f0; border-radius: 8px; padding: 16px;
+      font-size: 12px; overflow-x: auto; line-height: 1.6;
+    }
+    .badge {
+      display: inline-block; padding: 3px 10px; border-radius: 20px;
+      font-size: 11px; font-weight: 600;
+    }
+    .badge-ok { background: #dcfce7; color: #166534; }
+    .badge-warn { background: #fef3c7; color: #92400e; }
+    .badge-error { background: #fee2e2; color: #991b1b; }
+    #trigger-msg { font-size: 13px; color: #475569; margin-top: 8px; }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>London Job Alerts</h1>
+  <p>Daily emails · Coastal engineering &amp; pivot roles</p>
+</header>
+
+<main>
+  <!-- Status bar -->
+  <div class="status-bar">
+    <div class="stat">
+      <div class="val" id="total-jobs">{{ state.total_jobs }}</div>
+      <div class="lbl">Last jobs found</div>
+    </div>
+    <div class="divider"></div>
+    <div class="stat">
+      <div class="val">{{ categories | length }}</div>
+      <div class="lbl">Categories</div>
+    </div>
+    <div class="divider"></div>
+    <div class="stat">
+      <div class="val" id="last-run">
+        {% if state.last_run %}
+          {{ state.last_run[:10] }}
+        {% else %}
+          —
+        {% endif %}
+      </div>
+      <div class="lbl">Last run</div>
+    </div>
+    <div class="divider"></div>
+    <div class="stat">
+      <div class="val">
+        {% if state.sent is not none %}
+          <span class="badge {{ 'badge-ok' if state.sent else 'badge-error' }}">
+            {{ 'Sent' if state.sent else 'Failed' }}
+          </span>
+        {% else %}
+          <span class="badge badge-warn">Pending</span>
+        {% endif %}
+      </div>
+      <div class="lbl">Email status</div>
+    </div>
+
+    <div class="actions">
+      <a href="/preview" target="_blank" class="btn btn-secondary">Preview email</a>
+      <button class="btn btn-primary" id="send-btn" onclick="triggerSend(false)">
+        Send now
+      </button>
+      <button class="btn btn-secondary" id="dry-btn" onclick="triggerSend(true)">
+        Dry run
+      </button>
+    </div>
+  </div>
+  <div id="trigger-msg"></div>
+
+  <!-- Categories -->
+  <div class="section-title">Search Categories</div>
+  <div class="categories">
+    {% for cat in categories %}
+    <div class="cat-card" style="border-left-color: {{ cat.color }}">
+      <h3 style="color: {{ cat.color }}">{{ cat.name }}</h3>
+      <div class="queries">{{ cat.queries | join(' · ') }}</div>
+    </div>
+    {% endfor %}
+  </div>
+
+  <!-- Setup guide -->
+  <div class="setup">
+    <h2>Setup Guide</h2>
+    <p>This app runs automatically every morning via <strong>GitHub Actions</strong>.
+       You need to add the following secrets to your GitHub repository
+       (<code>Settings → Secrets and variables → Actions</code>):</p>
+
+    <ol>
+      <li>
+        <strong>ADZUNA_APP_ID</strong> and <strong>ADZUNA_APP_KEY</strong> — free API keys from
+        <code>developer.adzuna.com</code> (register, create an app, copy ID + Key)
+      </li>
+      <li>
+        <strong>REED_API_KEY</strong> — free key from <code>reed.co.uk/developers/jobseeker</code>
+        (optional but recommended for broader UK coverage)
+      </li>
+      <li>
+        <strong>GMAIL_USER</strong> — your Gmail address: <code>evanelder1992@gmail.com</code>
+      </li>
+      <li>
+        <strong>GMAIL_APP_PASSWORD</strong> — a Gmail App Password
+        (Google Account → Security → 2-Step Verification → App passwords;
+        create one for "Mail")
+      </li>
+    </ol>
+
+    <p>Once secrets are set, the GitHub Actions workflow will run at <strong>07:00 UTC daily</strong>
+       and email results to <code>evanelder1992@gmail.com</code>.</p>
+
+    <p>You can also trigger it manually from the <strong>Actions</strong> tab in GitHub
+       (look for the <em>Daily Job Alert Email</em> workflow → <em>Run workflow</em>).</p>
+
+    <p><strong>Running locally:</strong></p>
+    <pre>cd job-alerts
+pip install -r requirements.txt
+export ADZUNA_APP_ID=xxx  ADZUNA_APP_KEY=yyy
+export GMAIL_USER=evanelder1992@gmail.com  GMAIL_APP_PASSWORD=zzz
+python job_alerts.py            # live send
+python job_alerts.py --dry-run  # skip actual email</pre>
+  </div>
+
+</main>
+
+<script>
+  async function triggerSend(dryRun) {
+    const sendBtn = document.getElementById('send-btn');
+    const dryBtn  = document.getElementById('dry-btn');
+    const msg     = document.getElementById('trigger-msg');
+    sendBtn.disabled = dryBtn.disabled = true;
+    msg.textContent = dryRun ? 'Running dry run…' : 'Searching jobs and sending email…';
+    try {
+      const res = await fetch('/trigger', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ dry_run: dryRun })
+      });
+      if (res.ok) {
+        msg.textContent = 'Started! Polling for results…';
+        pollStatus();
+      } else {
+        const d = await res.json();
+        msg.textContent = 'Error: ' + (d.error || res.statusText);
+        sendBtn.disabled = dryBtn.disabled = false;
+      }
+    } catch (e) {
+      msg.textContent = 'Request failed: ' + e;
+      sendBtn.disabled = dryBtn.disabled = false;
+    }
+  }
+
+  function pollStatus() {
+    const interval = setInterval(async () => {
+      const res = await fetch('/status');
+      const d   = await res.json();
+      if (!d.running) {
+        clearInterval(interval);
+        document.getElementById('total-jobs').textContent = d.total_jobs;
+        document.getElementById('last-run').textContent   = (d.last_run || '').slice(0, 10);
+        document.getElementById('trigger-msg').textContent =
+          `Done — ${d.total_jobs} jobs found, email ${d.sent ? 'sent ✓' : 'not sent ✗'}`;
+        document.getElementById('send-btn').disabled = false;
+        document.getElementById('dry-btn').disabled  = false;
+      }
+    }, 2500);
+  }
+</script>
+
+</body>
+</html>
